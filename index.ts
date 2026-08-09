@@ -420,15 +420,61 @@ function buildLineCountSuffix(thinkingText: string): string {
 	const noun = lineCount === 1 ? "line" : "lines";
 	return " " + t.fg("dim", "·") + " " + t.fg("dim", `${lineCount} ${noun}`);
 }
+/**
+ * Word-wrap a string to fit within `width` columns. Splits on word boundaries
+ * (spaces) where possible; falls back to hard break when a single word exceeds
+ * the width.
+ */
+function wordWrap(text: string, width: number): string {
+	if (width <= 0) return text;
+	const lines = text.split('\n');
+	const result: string[] = [];
+	for (const line of lines) {
+		if (line.length <= width) {
+			result.push(line);
+		} else {
+			let start = 0;
+			while (start < line.length) {
+				if (start + width >= line.length) {
+					result.push(line.slice(start));
+					break;
+				}
+				// Try to break at the last space within the width
+				const chunk = line.slice(start, start + width + 1);
+				const lastSpace = chunk.lastIndexOf(' ');
+				if (lastSpace > 0) {
+					result.push(chunk.slice(0, lastSpace));
+					start += lastSpace + 1;
+				} else {
+					// No space found — hard break at width
+					result.push(line.slice(start, start + width));
+					start += width;
+				}
+			}
+		}
+	}
+	return result.join('\n');
+}
 
 /**
- * Build a small styled box showing the last N lines of collapsed thinking text.
- * The box uses the same display mode (background/bordered) and colors as the
- * expanded thinking box, so the visual style is consistent.
+ * Build a small styled box showing the last N visual lines of collapsed
+ * thinking text. The text is word-wrapped first (using
+ * `ESTIMATED_RENDER_WIDTH` minus the mode's structural reservation) so the
+ * visible height stays consistent as content streams in — a single long raw
+ * line that would wrap to, say, 4 visual lines is correctly counted as 4,
+ * preventing the box from bouncing in height.
+ *
  * Returns null if there's no content to show.
  */
 function createLastLinesBox(thinkingText: string): Component | null {
-	const lines = thinkingText.split('\n');
+	// Compute the inner width the text will render at, using the same
+	// estimated-width convention as buildLineCountSuffix.
+	const innerWidth =
+		config.displayMode === "bordered"
+			? ESTIMATED_RENDER_WIDTH - 2
+			: ESTIMATED_RENDER_WIDTH - 2 * config.paddingX;
+	const wrapped = wordWrap(thinkingText, Math.max(1, innerWidth));
+	const lines = wrapped.split('\n');
 	const sliced = lines.slice(-config.lastLinesCount);
 	const content = sliced.join('\n');
 
