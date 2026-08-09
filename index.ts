@@ -101,8 +101,9 @@ interface ThinkingBoxConfig {
 	showThinkingLevel: boolean;
 	showArrow: boolean;
 	showLineCount: boolean;
+	showLastLines: boolean;
+	lastLinesCount: number;
 }
-
 // JSON imports widen string values to `string`; narrow back to the union so
 // the rest of the file is exhaustively type-checked.
 let config: ThinkingBoxConfig = {
@@ -325,20 +326,23 @@ class BorderedBox implements Container {
 /**
  * Build the thinking block header line.
  * Format:
- * - collapsed: "▶ {label} · {level} · {N lines} (hidden)"
+ * - collapsed: "▶ {label} · {level} · {N lines} [+ (hidden)]"
  * - expanded: "▼ {label} · {level}".
+ * If `showHiddenLabel` is false, the "(hidden)" suffix is omitted (used when
+ * the collapsed block also shows a last-lines preview).
  * Returns a Text component styled with the active theme.
  */
-function createThinkingHeader(hideThinking: boolean, thinkingText: string): Text {
+function createThinkingHeader(hideThinking: boolean, thinkingText: string, showHiddenLabel = true): Text {
 	const t = getTheme();
 	const label = config.headerLabel || "Thinking";
 	const levelSuffix = buildLevelSuffix();
 
 	if (hideThinking) {
-		// Collapsed state: "▶ {label}[ · {level}][ · {N lines}] (hidden)"
+		// Collapsed state: "▶ {label}[ · {level}][ · {N lines}]" [+ "(hidden)"]
 		const lineCountSuffix = buildLineCountSuffix(thinkingText);
 		const arrow = config.showArrow ? "▶ " : "";
-		const text = t.italic(t.fg("thinkingText", `${arrow}${label}${levelSuffix}${lineCountSuffix} (hidden)`));
+		const hiddenSuffix = showHiddenLabel ? " (hidden)" : "";
+		const text = t.italic(t.fg("thinkingText", `${arrow}${label}${levelSuffix}${lineCountSuffix}${hiddenSuffix}`));
 		return new Text(text, 1, 0);
 	}
 
@@ -415,6 +419,36 @@ function buildLineCountSuffix(thinkingText: string): string {
 	const t = getTheme();
 	const noun = lineCount === 1 ? "line" : "lines";
 	return " " + t.fg("dim", "·") + " " + t.fg("dim", `${lineCount} ${noun}`);
+}
+
+/**
+ * Build a small styled box showing the last N lines of collapsed thinking text.
+ * The box uses the same display mode (background/bordered) and colors as the
+ * expanded thinking box, so the visual style is consistent.
+ * Returns null if there's no content to show.
+ */
+function createLastLinesBox(thinkingText: string): Component | null {
+	const lines = thinkingText.split('\n');
+	const sliced = lines.slice(-config.lastLinesCount);
+	const content = sliced.join('\n');
+
+	if (!content.trim()) return null;
+
+	const t = getTheme();
+	const textComponent = new Text(t.fg("thinkingText", content), 0, 0);
+
+	if (config.displayMode === "bordered") {
+		const borderFgFn = createBorderFgFn(config.borderColor!);
+		const chars = resolveBorderChars(config.borderThickness, config.roundedCorners);
+		const bordered = new BorderedBox(0, 0, undefined, chars, borderFgFn);
+		bordered.addChild(textComponent);
+		return bordered;
+	}
+
+	const bgFn = createBgFn(config.bgColor!);
+	const box = new Box(1, 0, bgFn);
+	box.addChild(textComponent);
+	return box;
 }
 
 // ---------------------------------------------------------------------------
@@ -529,19 +563,29 @@ function applyMonkeyPatch(): void {
 					.some((c) => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
 				if (self.hideThinkingBlock) {
-					// Hidden thinking block.
+					// Hidden / collapsed thinking block.
+					const thinkText = content.thinking.trim();
+
 					if (config.showHeader) {
-						// Show a styled collapse indicator header
+						// Show a styled collapse indicator header.
+						// Omit the "(hidden)" suffix when showing a last-lines preview.
 						self.contentContainer.addChild(
-							createThinkingHeader(true, content.thinking.trim()),
+							createThinkingHeader(true, thinkText, !config.showLastLines),
 						);
-					} else {
-						// Fall back to original hidden label
+					} else if (!config.showLastLines) {
+						// Fall back to original hidden label (only if there's no last-lines preview).
 						const t = getTheme();
 						self.contentContainer.addChild(
 							new Text(t.italic(t.fg("thinkingText", self.hiddenThinkingLabel)), 1, 0),
 						);
 					}
+
+					// Last N lines preview (shown below the header when collapsed).
+					if (config.showLastLines) {
+						const preview = createLastLinesBox(thinkText);
+						if (preview) self.contentContainer.addChild(preview);
+					}
+
 					if (hasVisibleContentAfter) {
 						self.contentContainer.addChild(new Spacer(1));
 					}
@@ -1468,6 +1512,29 @@ export default function thinkingBoxExtension(pi: ExtensionAPI): void {
 								currentValue: config.showArrow ? "on" : "off",
 								values: ["on", "off"],
 							},
+							{
+								id: "showLastLines",
+								label: "Show Last Lines (Collapsed)",
+								description: "Show the last N lines of thinking content when the block is collapsed",
+								currentValue: config.showLastLines ? "on" : "off",
+								values: ["on", "off"],
+							},
+							{
+								id: "lastLinesCount",
+								label: "Last Lines Count",
+								get description() {
+									return config.showLastLines
+										? `Number of visible lines when collapsed (currently ${config.lastLinesCount})`
+										: "Enable 'Show Last Lines' to configure";
+								},
+								get currentValue() { return String(config.lastLinesCount); },
+								set currentValue(_v) { /* no-op */ },
+								get values() {
+									return config.showLastLines
+										? ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+										: [];
+								},
+							},
 						);
 
 						return items;
@@ -1489,7 +1556,11 @@ export default function thinkingBoxExtension(pi: ExtensionAPI): void {
 						const newList = new SettingsList(
 							items,
 							Math.min(items.length + 2, 15),
-							mainSlTheme,
+							wrapSettingsListThemeWithDisabledRow(
+								mainSlTheme,
+								"Last Lines Count",
+								() => !config.showLastLines,
+							),
 							(id, newValue) => {
 								const oldMode = config.displayMode;
 								switch (id) {
@@ -1540,6 +1611,15 @@ export default function thinkingBoxExtension(pi: ExtensionAPI): void {
 										break;
 									case "showLineCount":
 										config.showLineCount = newValue === "on";
+										break;
+									case "showLastLines":
+										config.showLastLines = newValue === "on";
+										break;
+									case "lastLinesCount":
+										const n = parseInt(newValue, 10);
+										if (!Number.isNaN(n) && n >= 1 && n <= 10) {
+											config.lastLinesCount = n;
+										}
 										break;
 								}
 								persistConfig();
